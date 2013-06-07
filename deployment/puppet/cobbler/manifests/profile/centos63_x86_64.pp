@@ -1,4 +1,4 @@
-#
+# 
 # This class is intended to make cobbler profile centos63_x86_64.
 #
 # [distro] The name of cobbler distro to bind profile to.
@@ -31,10 +31,10 @@ class cobbler::profile::centos63_x86_64(
               "url"  => "http://download.mirantis.com/centos-minimal",
               },
               {
-              "name" => "Mirantis-epel",
+              "name" => "Mirantis-epel-fuel-install",
               "url"  => "http://download.mirantis.com/epel-fuel-folsom-2.1",
               }
-			  ],
+              ],
 
   $ks_system_timezone         = "America/Los_Angeles",
 

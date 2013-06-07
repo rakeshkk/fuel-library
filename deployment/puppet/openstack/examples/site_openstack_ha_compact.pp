@@ -112,11 +112,11 @@ $controller_hostnames = keys($controller_internal_addresses)
 #Also, if you do not want Quantum HA, you MUST enable $quantum_network_node
 #on the ONLY controller
 $ha_provider = 'pacemaker'
-$use_unicast_corosync = false
+$use_unicast_corosync = true
 
 
 # Set nagios master fqdn
-$nagios_master        = 'nagios-server.your-domain-name.com'
+$nagios_master        = 'nagios-server.localdomain'
 ## proj_name  name of environment nagios configuration
 $proj_name            = 'test'
 
@@ -228,7 +228,7 @@ stage {'netconfig':
       before  => Stage['main'],
 }
 
-class {'l23network': stage=> 'netconfig'}
+class {'l23network': use_ovs=>$quantum, stage=> 'netconfig'}
 class node_netconfig (
   $mgmt_ipaddr,
   $mgmt_netmask  = '255.255.255.0',
@@ -283,8 +283,15 @@ $deployment_id = '79'
 # Consult openstack docs for differences between them
 $cinder                  = true
 
-# Should we install cinder on compute nodes?
-$cinder_on_computes      = false
+# Choose which nodes to install cinder onto
+# 'compute'            -> compute nodes will run cinder
+# 'controller'         -> controller nodes will run cinder
+# 'storage'            -> storage nodes will run cinder
+# 'fuel-controller-XX' -> specify particular host(s) by hostname
+# 'XXX.XXX.XXX.XXX'    -> specify particular host(s) by IP address
+# 'all'                -> compute, controller, and storage nodes will run cinder (excluding swift and proxy nodes)
+
+$cinder_nodes          = ['controller']
 
 #Set it to true if your want cinder-volume been installed to the host
 #Otherwise it will install api and scheduler services
@@ -302,6 +309,24 @@ $cinder_iscsi_bind_addr = $internal_address
 # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 # Leave this parameter empty if you want to create [cinder|nova]-volumes VG by yourself
 $nv_physical_volume     = ['/dev/sdz', '/dev/sdy', '/dev/sdx'] 
+
+#Evaluate cinder node selection
+if ($cinder) {
+  if (member($cinder_nodes,'all')) {
+    $is_cinder_node = true
+  } elsif (member($cinder_nodes,$::hostname)) {
+    $is_cinder_node = true
+  } elsif (member($cinder_nodes,$internal_address)) {
+    $is_cinder_node = true
+  } elsif ($node[0]['role'] =~ /controller/ ) {
+    $is_cinder_node = member($cinder_nodes,'controller')
+  } else {
+    $is_cinder_node = member($cinder_nodes,$node[0]['role'])
+  }
+} else {
+  $is_cinder_node = false
+}
+
 
 
 ### CINDER/VOLUME END ###
@@ -448,6 +473,7 @@ Exec { logoutput => true }
 # Globally apply an environment-based tag to all resources on each node.
 tag("${::deployment_id}::${::environment}")
 
+
 stage { 'openstack-custom-repo': before => Stage['netconfig'] }
 class { 'openstack::mirantis_repos':
   stage => 'openstack-custom-repo',
@@ -455,6 +481,18 @@ class { 'openstack::mirantis_repos':
   enable_test_repo=>$enable_test_repo,
   repo_proxy=>$repo_proxy,
 }
+ stage {'openstack-firewall': before => Stage['main'], require => Stage['netconfig'] } 
+ class { '::openstack::firewall':
+      stage => 'openstack-firewall'
+ }
+
+ if !defined(Class['selinux']) and ($::osfamily == 'RedHat') {
+  class { 'selinux':
+    mode=>"disabled",
+    stage=>"openstack-custom-repo"
+  }
+}
+
 
 if $::operatingsystem == 'Ubuntu' {
   class { 'openstack::apparmor::disable': stage => 'openstack-custom-repo' }
@@ -521,7 +559,7 @@ class compact_controller (
     segment_range           => $segment_range,
     cinder                  => $cinder,
     cinder_iscsi_bind_addr  => $cinder_iscsi_bind_addr,
-    manage_volumes          => $manage_volumes,
+    manage_volumes          => $cinder ? { false => $manage_volumes, default =>$is_cinder_node },
     galera_nodes            => $controller_hostnames,
     nv_physical_volume      => $nv_physical_volume,
     use_syslog              => $use_syslog,
@@ -572,9 +610,22 @@ node /fuel-controller-[\d+]/ {
   class { 'openstack::swift::storage_node':
     storage_type       => $swift_loopback,
     swift_zone         => $swift_zone,
-    swift_local_net_ip => $internal_address,
+    swift_local_net_ip => $swift_local_net_ip,
     master_swift_proxy_ip  => $master_swift_proxy_ip,
-    sync_rings             => ! $primary_proxy
+    sync_rings             => ! $primary_proxy,
+    #disable cinder in storage-node in order to avoid
+    #duplicate classes call with different parameters
+    cinder                 => false,
+    cinder_iscsi_bind_addr => $cinder_iscsi_bind_addr,
+    manage_volumes         => false,
+    nv_physical_volume     => $nv_physical_volume,
+    db_host                => $internal_virtual_ip,
+    service_endpoint       => $internal_virtual_ip,
+    cinder_rate_limits     => $cinder_rate_limits,
+    rabbit_nodes           => $controller_hostnames,
+    rabbit_password        => $rabbit_password,
+    rabbit_user            => $rabbit_user,
+    rabbit_ha_virtual_ip   => $internal_virtual_ip
   }
 
   if $primary_proxy {
@@ -588,7 +639,7 @@ node /fuel-controller-[\d+]/ {
     swift_proxies           => $swift_proxies,
     primary_proxy           => $primary_proxy,
     controller_node_address => $internal_virtual_ip,
-    swift_local_net_ip      => $internal_address,
+    swift_local_net_ip      => $swift_local_net_ip,
     master_swift_proxy_ip  => $master_swift_proxy_ip,
   }
 
@@ -639,7 +690,6 @@ node /fuel-compute-[\d+]/ {
     vncproxy_host          => $public_virtual_ip,
     verbose                => $verbose,
     vnc_enabled            => true,
-    manage_volumes         => $manage_volumes,
     nova_user_password     => $nova_user_password,
     cache_server_ip        => $controller_hostnames,
     service_endpoint       => $internal_virtual_ip,
@@ -649,7 +699,8 @@ node /fuel-compute-[\d+]/ {
     quantum_host           => $internal_virtual_ip,
     tenant_network_type    => $tenant_network_type,
     segment_range          => $segment_range,
-    cinder                 => $cinder_on_computes,
+    cinder                 => $cinder,
+    manage_volumes         => $cinder ? { false => $manage_volumes, default =>$is_cinder_node },
     cinder_iscsi_bind_addr => $cinder_iscsi_bind_addr,
     nv_physical_volume     => $nv_physical_volume,
     db_host                => $internal_virtual_ip,
