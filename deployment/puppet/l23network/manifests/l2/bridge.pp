@@ -8,8 +8,7 @@
 #   Bridge name.
 #
 # [*skip_existing*]
-#   If brigde with this name already exists -- we ignore this fact and
-#   don't create bridge without generate error.
+#   If this bridge already exists it will be ignored without any errors.
 #   Must be true or false.
 #
 # [*external_ids*]
@@ -21,6 +20,9 @@ define l23network::l2::bridge (
   $ensure        = present,
   $skip_existing = false,
 ) {
+  if ! $::l23network::l2::use_ovs {
+    fail('You must enable Open vSwitch by setting the l23network::l2::use_ovs to true.')
+  }
   if ! defined (L2_ovs_bridge[$name]) {
     l2_ovs_bridge {$name:
       ensure       => $ensure,

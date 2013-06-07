@@ -54,24 +54,52 @@ define haproxy_service($order, $balancers, $virtual_ips, $port, $define_cookies 
       $balancer_port = $port
     }
   }
-
-  haproxy::listen { $name:
-    order            => $order - 1,
-    ipaddress        => $virtual_ips,
-    ports            => $port,
-    options          => $haproxy_config_options,
-    collect_exported => false
+  
+  add_haproxy_service { $name : 
+    order                    => $order, 
+    balancers                => $balancers, 
+    virtual_ips              => $virtual_ips, 
+    port                     => $port, 
+    haproxy_config_options   => $haproxy_config_options, 
+    balancer_port            => $balancer_port, 
+    balancermember_options   => $balancermember_options, 
+    define_cookies           => $define_cookies, 
+    define_backend           => $define_backend,
   }
-  @haproxy::balancermember { "${name}":
-    order                  => $order,
-    listening_service      => $name,
-    balancers              => $balancers,
-    balancer_port          => $balancer_port,
-    balancermember_options => $balancermember_options,
-    define_cookies         => $define_cookies,
-    define_backend        =>  $define_backend
-  }
+}
 
+# add_haproxy_service moved to separate define to allow adding custom sections 
+# to haproxy config without any default config options, except only required ones.
+define add_haproxy_service (
+    $order, 
+    $balancers, 
+    $virtual_ips, 
+    $port, 
+    $haproxy_config_options, 
+    $balancer_port, 
+    $balancermember_options,
+    $mode = 'tcp',
+    $define_cookies = false, 
+    $define_backend = false, 
+    $collect_exported = false
+    ) {
+    haproxy::listen { $name:
+      order            => $order - 1,
+      ipaddress        => $virtual_ips,
+      ports            => $port,
+      options          => $haproxy_config_options,
+      collect_exported => $collect_exported,
+      mode             => $mode,
+    }
+    @haproxy::balancermember { "${name}":
+      order                  => $order,
+      listening_service      => $name,
+      balancers              => $balancers,
+      balancer_port          => $balancer_port,
+      balancermember_options => $balancermember_options,
+      define_cookies         => $define_cookies,
+      define_backend        =>  $define_backend,
+    }
 }
 
 define keepalived_dhcp_hook($interface)
@@ -122,9 +150,7 @@ class openstack::controller_ha (
 
     file { '/etc/rsyslog.d/haproxy.conf':
       ensure => present,
-      content => '$ModLoad imudp
-$UDPServerRun 514
-local0.* -/var/log/haproxy.log'
+      content => 'local0.* -/var/log/haproxy.log'
     }
     Class['keepalived'] -> Class ['nova::rabbitmq']
     haproxy_service { 'horizon':    order => 15, port => 80, virtual_ips => [$public_virtual_ip], define_cookies => true  }
@@ -220,7 +246,7 @@ local0.* -/var/log/haproxy.log'
 
     class { 'haproxy':
       enable => true,
-      global_options   => merge($::haproxy::params::global_options, {'log' => "${internal_address} local0"}),
+      global_options   => merge($::haproxy::params::global_options, {'log' => "/dev/log local0"}),
       defaults_options => merge($::haproxy::params::defaults_options, {'mode' => 'http'}),
       require => Sysctl::Value['net.ipv4.ip_nonlocal_bind'],
     }
@@ -238,7 +264,7 @@ local0.* -/var/log/haproxy.log'
     $internal_vrid = $::deployment_id + 1
 
     class { 'keepalived':
-      require => [ Class['haproxy'], Class['::openstack::firewall']  ]
+      require => Class['haproxy'] ,
     }
 
     keepalived::instance { $public_vrid:
@@ -254,10 +280,7 @@ local0.* -/var/log/haproxy.log'
       priority => $primary_controller ? { true => 101,      default => 100      },
     }
 
-    class { '::openstack::firewall':
-      before => Class['galera']
-    }
-    Class['haproxy'] -> Class['galera']
+   Class['haproxy'] -> Class['galera']
 
     class { '::openstack::controller':
       public_address          => $public_virtual_ip,
@@ -372,10 +395,8 @@ local0.* -/var/log/haproxy.log'
     }
     if $ha_provider == 'pacemaker' {
       if $use_unicast_corosync {
-      $unicast_addresses = $controller_internal_addresses
-      }
-      else
-      {
+        $unicast_addresses = $controller_internal_addresses
+      } else {
         $unicast_addresses = undef
       }
       class {'openstack::corosync':
